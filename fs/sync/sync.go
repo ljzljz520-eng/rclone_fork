@@ -464,7 +464,9 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 							return
 						}
 					} else {
-						deleteFileErr := operations.DeleteFile(s.ctx, src)
+						// Deleting the source of a move is permanent even
+						// when --trash is enabled.
+						deleteFileErr := operations.DeleteFile(operations.TrashBypassCtx(s.ctx), src)
 						s.processError(deleteFileErr)
 						s.logger(s.ctx, operations.TransferError, pair.Src, pair.Dst, deleteFileErr)
 					}
@@ -511,8 +513,9 @@ func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs,
 			if src != dst {
 				_, err = operations.MoveTransfer(ctx, fdst, dst, src.Remote(), src)
 			} else {
-				// src == dst signals delete the src
-				err = operations.DeleteFile(ctx, src)
+				// src == dst signals delete the src; this is part of a
+				// move, so delete permanently even with --trash enabled.
+				err = operations.DeleteFile(operations.TrashBypassCtx(ctx), src)
 			}
 		} else {
 			_, err = operations.Copy(ctx, fdst, dst, src.Remote(), src)
@@ -1351,6 +1354,8 @@ func (s *syncCopyMove) Match(ctx context.Context, dst, src fs.DirEntry) (recurse
 // dir is the start directory, "" for root
 func runSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.DeleteMode, DoMove bool, deleteEmptySrcDirs bool, copyEmptySrcDirs bool, allowOverlap bool) error {
 	ci := fs.GetConfig(ctx)
+	// Hide the trash directory from the sync walks when enabled.
+	ctx = operations.TrashFilterCtx(ctx)
 	if deleteMode != fs.DeleteModeOff && DoMove {
 		return fserrors.FatalError(errors.New("can't delete and move at the same time"))
 	}

@@ -674,7 +674,9 @@ func (f *File) Remove() (err error) {
 	f.muRW.Lock() // muRW must be locked before mu to avoid
 	f.mu.Lock()   // deadlock in RWFileHandle.openPending and .close
 	if f.o != nil {
-		err = f.o.Remove(f.ctx)
+		// Route through operations so --trash moves the file into the
+		// trash directory instead of deleting it permanently.
+		err = operations.DeleteFile(f.ctx, f.o)
 	}
 	f.mu.Unlock()
 	f.muRW.Unlock()

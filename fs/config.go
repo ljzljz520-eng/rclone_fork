@@ -273,6 +273,31 @@ var ConfigOptionsInfo = Options{{
 	Help:    "Preserve the extension when using --suffix",
 	Groups:  "Sync",
 }, {
+	Name:    "trash",
+	Default: false,
+	Help:    "Move deleted files into the trash directory instead of deleting them",
+	Groups:  "Important",
+}, {
+	Name:    "trash_dir",
+	Default: ".rclone-trash",
+	Help:    "Directory under the Fs root to move deleted files into when --trash is set",
+	Groups:  "Important",
+}, {
+	Name:    "trash_retention",
+	Default: 7 * 24 * time.Hour,
+	Help:    "Time to keep trashed files before deleting them permanently (0 to keep forever)",
+	Groups:  "Important",
+}, {
+	Name:    "trash_max_size",
+	Default: SizeSuffix(-1),
+	Help:    "Maximum total size of the trash directory; oldest trashed files are deleted first if exceeded (-1 for no limit)",
+	Groups:  "Important",
+}, {
+	Name:    "trash_cleanup_interval",
+	Default: time.Hour,
+	Help:    "Minimum interval between automatic trash cleanups (0 to disable automatic cleanup)",
+	Groups:  "Important",
+}, {
 	Name:    "fast_list",
 	Default: false,
 	Help:    "Use recursive list if available; uses more memory but fewer transactions",
@@ -616,6 +641,11 @@ type ConfigInfo struct {
 	BackupDir                  string            `config:"backup_dir"`
 	Suffix                     string            `config:"suffix"`
 	SuffixKeepExtension        bool              `config:"suffix_keep_extension"`
+	Trash                      bool              `config:"trash"`
+	TrashDir                   string            `config:"trash_dir"`
+	TrashRetention             Duration          `config:"trash_retention"`
+	TrashMaxSize               SizeSuffix        `config:"trash_max_size"`
+	TrashCleanupInterval       Duration          `config:"trash_cleanup_interval"`
 	UseListR                   bool              `config:"fast_list"`
 	ListCutoff                 int               `config:"list_cutoff"`
 	BufferSize                 SizeSuffix        `config:"buffer_size"`

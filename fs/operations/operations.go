@@ -517,8 +517,9 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
 		fs.Errorf(src, "Not deleting source as copy failed: %v", err)
 		return newDst, err
 	}
-	// Delete src if no error on copy
-	return newDst, DeleteFile(ctx, src)
+	// Delete src if no error on copy. This is part of a move so the
+	// source is deleted permanently even when --trash is enabled.
+	return newDst, DeleteFile(trashBypassCtx(ctx), src)
 }
 
 // CanServerSideMove returns true if fdst support server-side moves or
@@ -563,15 +564,20 @@ func DeleteFileWithBackupDir(ctx context.Context, dst fs.Object, backupDir fs.Fs
 	if err != nil {
 		return err
 	}
+	useTrash := backupDir == nil && trashActive(ctx) && !trashExcluded(ctx, dst.Fs(), dst.Remote())
 	action, actioned := "delete", "Deleted"
 	if backupDir != nil {
 		action, actioned = "move into backup dir", "Moved into backup dir"
+	} else if useTrash {
+		action, actioned = "move into trash", "Moved into trash"
 	}
 	skip := SkipDestructive(ctx, dst, action)
 	if skip {
 		// do nothing
 	} else if backupDir != nil {
 		err = MoveBackupDir(ctx, backupDir, dst)
+	} else if useTrash {
+		err = trashMove(ctx, dst)
 	} else {
 		err = dst.Remove(ctx)
 	}
@@ -1152,8 +1158,14 @@ func Rmdir(ctx context.Context, f fs.Fs, dir string) error {
 
 // Purge removes a directory and all of its contents
 func Purge(ctx context.Context, f fs.Fs, dir string) (err error) {
+	// With the trash enabled, skip any backend native purge so files
+	// are moved into the trash instead of being deleted permanently.
+	useTrash := trashActive(ctx) && !isTrashFs(ctx, f)
+	// Purging the root itself with trash enabled keeps the root,
+	// which contains the trash directory.
+	leaveRoot := useTrash && dir == ""
 	doFallbackPurge := true
-	if doPurge := f.Features().Purge; doPurge != nil {
+	if doPurge := f.Features().Purge; doPurge != nil && !useTrash {
 		doFallbackPurge = false
 		accounting.Stats(ctx).DeletedDirs(1)
 		if SkipDestructive(ctx, fs.LogDirName(f, dir), "purge directory") {
@@ -1166,11 +1178,24 @@ func Purge(ctx context.Context, f fs.Fs, dir string) (err error) {
 	}
 	if doFallbackPurge {
 		// DeleteFiles and Rmdir observe --dry-run
-		err = DeleteFiles(ctx, listToChan(ctx, f, dir))
-		if err != nil {
-			return err
+		if useTrash {
+			// Files are moved into the trash rather than deleted:
+			// list with filters honoured so the trash directory is
+			// excluded, but let Rmdirs see everything so directories
+			// containing trash are treated as non-empty and spared.
+			purgeListCtx := trashPurgeCtx(ctx)
+			err = DeleteFiles(purgeListCtx, listToChan(purgeListCtx, f, dir, false))
+			if err != nil {
+				return err
+			}
+			err = Rmdirs(trashInternalCtx(ctx), f, dir, leaveRoot)
+		} else {
+			err = DeleteFiles(ctx, listToChan(ctx, f, dir, true))
+			if err != nil {
+				return err
+			}
+			err = Rmdirs(ctx, f, dir, false)
 		}
-		err = Rmdirs(ctx, f, dir, false)
 	}
 	if err != nil {
 		err = fs.CountError(ctx, err)
@@ -1183,6 +1208,8 @@ func Purge(ctx context.Context, f fs.Fs, dir string) (err error) {
 // obeys includes and excludes.
 func Delete(ctx context.Context, f fs.Fs) error {
 	ci := fs.GetConfig(ctx)
+	// Exclude the trash directory from the listing walk when enabled.
+	ctx = TrashFilterCtx(ctx)
 	delChan := make(fs.ObjectsChan, ci.Checkers)
 	delErr := make(chan error, 1)
 	go func() {
@@ -1252,16 +1279,19 @@ func RemoveExisting(ctx context.Context, f fs.Fs, remote string, operation strin
 
 // listToChan will transfer all objects in the listing to the output
 //
+// If includeAll is false the filter rules are honoured, otherwise all
+// the objects are listed ignoring the filter (used by Purge).
+//
 // If an error occurs, the error will be logged, and it will close the
 // channel.
 //
 // If the error was ErrorDirNotFound then it will be ignored
-func listToChan(ctx context.Context, f fs.Fs, dir string) fs.ObjectsChan {
+func listToChan(ctx context.Context, f fs.Fs, dir string, includeAll bool) fs.ObjectsChan {
 	ci := fs.GetConfig(ctx)
 	o := make(fs.ObjectsChan, ci.Checkers)
 	go func() {
 		defer close(o)
-		err := walk.ListR(ctx, f, dir, true, ci.MaxDepth, walk.ListObjects, func(entries fs.DirEntries) error {
+		err := walk.ListR(ctx, f, dir, includeAll, ci.MaxDepth, walk.ListObjects, func(entries fs.DirEntries) error {
 			entries.ForObject(func(obj fs.Object) {
 				o <- obj
 			})
@@ -1994,7 +2024,10 @@ func BackupDir(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, srcFileName string) 
 func MoveBackupDir(ctx context.Context, backupDir fs.Fs, dst fs.Object) (err error) {
 	remoteWithSuffix := SuffixName(ctx, dst.Remote())
 	overwritten, _ := backupDir.NewObject(ctx, remoteWithSuffix)
-	_, err = Move(ctx, backupDir, overwritten, remoteWithSuffix, dst)
+	// The backup dir is the user's chosen safety net for syncs, so
+	// files moved there (and overwritten there) are not moved into
+	// the trash as well.
+	_, err = Move(trashBypassCtx(ctx), backupDir, overwritten, remoteWithSuffix, dst)
 	return err
 }
 
